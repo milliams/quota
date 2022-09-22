@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: MIT
 
 """
-Disaply the output of ``mmlsquota`` graphically
+Display the output of ``mmlsquota`` graphically
 """
 
 import itertools
@@ -14,7 +14,10 @@ import subprocess
 
 
 def get_colour(tput_args):
-    return subprocess.check_output(["tput"] + tput_args).decode()
+    try:
+        return subprocess.run(["tput"] + tput_args, check=True, encoding="utf8", stdout=subprocess.PIPE).stdout
+    except subprocess.CalledProcessError:
+        return ""
 
 
 class Color:
