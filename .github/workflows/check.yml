@@ -22,9 +22,9 @@ jobs:
       uses: actions/setup-python@v3
       with:
         python-version: "${{ matrix.python-version }}"
-    - name: Install pytest
+    - name: Move script to a module
       run: |
-        python -m pip install pytest
+        ln -s quota quota.py
     - name: Test
       run: |
-        python -m pytest --doctest-modules
+        python -m doctest --verbose quota.py
