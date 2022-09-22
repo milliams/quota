@@ -1,0 +1,198 @@
+#! /usr/bin/python3
+
+# SPDX-FileCopyrightText: © 2022 Matt Williams <matt.williams@bristol.ac.uk>
+# SPDX-License-Identifier: MIT
+
+"""
+Disaply the output of ``mmlsquota`` graphically
+"""
+
+import itertools
+import operator
+import shutil
+import subprocess
+
+
+def get_colour(tput_args):
+    return subprocess.check_output(["tput"] + tput_args).decode()
+
+
+class Color:
+    BOLD = get_colour(["bold"])
+    RESET = get_colour(["sgr0"])
+
+    BLUE = get_colour(["setaf", "4"])
+    GREEN = get_colour(["setaf", "2"])
+    ORANGE = get_colour(["setaf", "3"])
+    RED = get_colour(["setaf", "1"])
+
+    @classmethod
+    def red(cls, s):
+        return cls.RED + s + cls.RESET
+
+    @classmethod
+    def green(cls, s):
+        return cls.GREEN + s + cls.RESET
+
+    @classmethod
+    def orange(cls, s):
+        return cls.ORANGE + s + cls.RESET
+
+
+def kib_to_str(b):
+    """
+    >>> kib_to_str(1048576)
+    '1 GiB'
+    >>> kib_to_str(1200000)
+    '1.1 GiB'
+    """
+    gib = f"{b / (1024**2):.1f}".rstrip("0").rstrip(".")
+    return f"{gib} GiB"
+
+
+def count_to_str(c):
+    k = f"{c/1024:.1f}".rstrip("0").rstrip(".")
+    return f"{k} Ki"
+
+
+def argmax(l):
+    """
+    >>> argmax([5, 2, 7, 9])
+    3
+    >>> argmax([10, 5, 2, 7])
+    0
+    """
+    index, element = max(enumerate(l), key=operator.itemgetter(1))
+    return index
+
+
+def apportion(*counts, total):
+    """
+    >>> apportion(5, 2, 3, total=10)
+    (5, 2, 3)
+    >>> apportion(5, 2, 3, total=11)
+    (6, 2, 3)
+    >>> apportion(5, 2, 3, total=100)
+    (50, 20, 30)
+    """
+    portions = [0]*len(counts)
+    target_fractions = [c/sum(counts) for c in counts]
+    for i in range(total):
+        current_fractions = [p/max(sum(portions), 1) for p in portions]
+        loss = [t - y for y, t in zip(current_fractions, target_fractions)]
+        portions[argmax(loss)] += 1
+    return tuple(portions)
+
+
+def usage_bar(usage, quota, limit, width, formatter):
+    under_quota = usage <= quota
+    over_quota = quota < usage <= limit
+    over_limit = usage > limit
+
+    max_usage = max(usage, limit)
+    usage_per_col = max_usage / width
+
+    quota_cols, limit_cols, overflow_cols = apportion(quota, limit - quota, max(0, usage - limit), total=width)
+    used_cols = int(round(usage / usage_per_col))
+
+    segments = []
+
+    if under_quota:
+        unused_quota_cols = quota_cols - used_cols
+        segments.append(Color.green("#"*used_cols))
+        segments.append("="*unused_quota_cols)
+        segments.append("="*limit_cols)
+        segments.append(" "*overflow_cols)
+    if over_quota:
+        over_quota_cols = used_cols - quota_cols
+        under_limit_cols = quota_cols + limit_cols - used_cols
+        segments.append(Color.green("#"*quota_cols))
+        segments.append(Color.orange("#"*over_quota_cols))
+        segments.append("="*under_limit_cols)
+        segments.append(" "*overflow_cols)
+    if over_limit:
+        over_limit_cols = used_cols - (quota_cols + limit_cols)
+        segments.append(Color.green("#"*quota_cols))
+        segments.append(Color.orange("#"*limit_cols))
+        segments.append(Color.red("#"*over_limit_cols))       
+
+    usage_label = formatter(usage)
+
+    usage_labels = []
+    usage_labels.append("Usage: ")
+    usage_labels.append(" "*(used_cols-len(usage_label)-len(usage_labels[-1])))
+    usage_labels.append(usage_label)
+
+    quota_label = f"Quota: {formatter(quota)}"
+    limit_label = f"Limit: {formatter(limit)}"
+
+    quota_labels = (" "*(quota_cols-len(quota_label))) + quota_label
+    limit_labels = (" "*(quota_cols+limit_cols-len(limit_label))) + limit_label
+
+    # Do the two sets of labels overlap?
+    if len(quota_labels) >= (len(limit_labels) - len(limit_labels.lstrip(" "))):
+        # If they overlap, put them on separate lines
+        quota_limit_labels = quota_labels, limit_labels
+    else:
+        # If they don't, combine them into one line
+        quota_limit_labels = ["".join(q or l for q, l in itertools.zip_longest(quota_labels, limit_labels))]
+
+    returns = []
+    returns .append("".join(usage_labels))
+    returns.append("".join(segments))
+    returns.extend(quota_limit_labels)
+    return returns
+
+
+def data_to_lines(data, usage_key, quota_key, limit_key, title, width, num_formatter):
+    """
+    Extract the usage etc. info from the data dictionary and plot it as a bar.
+    Retuns a list of lines in the block.
+    """
+    usage = int(data[usage_key])
+    quota = int(data[quota_key])
+    limit = int(data[limit_key])
+    lines = usage_bar(usage, quota, limit, width, formatter=num_formatter)
+    lines = [title] + lines
+    lines = [f"{l:<{width}}" for l in lines]
+    return lines
+
+
+def main():
+    max_width = 160
+    min_width_for_grid = 80
+    grid_margin = 10
+
+    page_width = min(shutil.get_terminal_size().columns, max_width)
+    make_grid = page_width >= min_width_for_grid
+
+    out = subprocess.run(["/usr/lpp/mmfs/bin/mmlsquota", "--block-size=1k", "-Y", "mmfs1:sata1-hpc-user-home", "mmfs1:sata1-hpc-user-work"], stdout=subprocess.PIPE, encoding="utf8")
+    lines = out.stdout.strip().split("\n")
+    headers = lines[0].strip(":").split(":")
+    
+    section_width = int((page_width - grid_margin) / 2) if make_grid else page_width
+
+    for line in lines[1:]:
+        fields = line.strip(":").split(":")
+        data = dict(zip(headers, fields))
+        fileset_name = data["filesetname"].replace("sata1-hpc-user-", "").upper()
+        print(f"Fileset: {fileset_name}")
+        print()
+
+        blocks = data_to_lines(data, "blockUsage", "blockQuota", "blockLimit", "File size", section_width, kib_to_str)
+
+        files = data_to_lines(data, "filesUsage", "filesQuota", "filesLimit", "File count", section_width, count_to_str)
+
+        if make_grid:
+            for col1, col2 in itertools.zip_longest(blocks, files, fillvalue=" "*section_width):
+                print(col1, end="")
+                print(" "*grid_margin, end="")
+                print(col2, end="")
+                print()
+        else:
+            print("\n".join(blocks))
+            print("\n".join(files))
+
+
+if __name__ == "__main__":
+    main()
